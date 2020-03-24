@@ -1,0 +1,74 @@
+
+-- Configure the DB2 to allow MQT based optimization
+--   DFT_REFRESH_AGE - default value for CURRENT REFRESH AGE special register
+--   DFT_MTTB_TYPES  - default value for CURRENT MAINTAINED TABLE TYPES FOR OPTIMIZATION special register
+
+UPDATE DB CFG FOR BIGSQL USING DFT_REFRESH_AGE ANY;
+UPDATE DB CFG FOR BIGSQL USING DFT_MTTB_TYPES ALL;
+
+
+-- Create MQTs & caching tables associated with the nicknames
+
+CREATE TABLE mqt_blocks AS (SELECT * FROM nn_blocks_opt)
+DATA INITIALLY DEFERRED
+REFRESH DEFERRED
+DISABLE QUERY OPTIMIZATION
+MAINTAINED BY USER;
+
+CREATE TABLE mqt_tx AS (SELECT * FROM nn_tx_opt)
+DATA INITIALLY DEFERRED
+REFRESH DEFERRED
+DISABLE QUERY OPTIMIZATION
+MAINTAINED BY USER;
+
+CREATE TABLE cache_blocks AS (SELECT * FROM nn_blocks) WITH NO DATA;
+
+CREATE TABLE cache_tx AS (SELECT * FROM nn_tx) WITH NO DATA;
+
+
+-- Set the integrity pending state of the MQTs
+
+SET INTEGRITY FOR mqt_blocks MATERIALIZED QUERY IMMEDIATE UNCHECKED;
+SET INTEGRITY FOR mqt_tx MATERIALIZED QUERY IMMEDIATE UNCHECKED;
+
+
+-- Import the existing rows from the nicknames into the MQTs
+
+INSERT INTO mqt_blocks (SELECT * FROM nn_blocks WHERE ORDINAL > (SELECT MAX(ORDINAL) FROM mqt_blocks));
+INSERT INTO mqt_tx (SELECT * FROM nn_tx WHERE BLOCK_ORDINAL > (SELECT MAX(BLOCK_ORDINAL) FROM mqt_tx));
+INSERT INTO cache_blocks (SELECT * FROM nn_blocks WHERE ORDINAL > (SELECT MAX(ORDINAL) FROM cache_blocks));
+INSERT INTO cache_tx (SELECT * FROM nn_tx WHERE BLOCK_ORDINAL > (SELECT MAX(BLOCK_ORDINAL) FROM cache_tx));
+
+
+-- Enable optimization for some of the MQTs
+
+ALTER MATERIALIZED QUERY mqt_blocks SET ENABLE QUERY OPTIMIZATION;
+ALTER MATERIALIZED QUERY mqt_tx SET ENABLE QUERY OPTIMIZATION;
+
+
+-- Create stats for the MQTs & caching tables
+
+ANALYZE TABLE mqt_blocks COMPUTE STATISTICS FOR ALL COLUMNS;
+ANALYZE TABLE mqt_tx COMPUTE STATISTICS FOR ALL COLUMNS;
+ANALYZE TABLE cache_blocks COMPUTE STATISTICS FOR ALL COLUMNS;
+ANALYZE TABLE cache_tx COMPUTE STATISTICS FOR ALL COLUMNS;
+
+
+-- Create the view to access both cached & fresh data
+
+CREATE VIEW all_blocks
+AS (SELECT * 
+        FROM cache_blocks
+    UNION ALL 
+        SELECT * 
+            FROM nn_blocks 
+            WHERE ORDINAL > (SELECT MAX(ORDINAL) FROM cache_blocks));
+
+CREATE VIEW all_tx 
+AS (SELECT * 
+        FROM cache_tx 
+    UNION ALL 
+        SELECT * 
+            FROM nn_tx 
+            WHERE BLOCK_ORDINAL > (SELECT MAX(BLOCK_ORDINAL) FROM cache_tx));
+
